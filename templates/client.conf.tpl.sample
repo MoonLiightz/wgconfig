@@ -1,0 +1,9 @@
+[Interface]
+PrivateKey = $PRIVATE_KEY
+Address = $CLIENT_IP
+DNS = $DNS
+
+[Peer]
+PublicKey = $SERVER_PUBLIC_KEY
+AllowedIPs = $ALLOWED_IPS
+Endpoint = $SERVER_LISTEN

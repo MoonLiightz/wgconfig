@@ -1,0 +1,9 @@
+*
+
+!.gitignore
+!README.md
+!LICENSE
+
+!wgcfg
+!*.sample
+!templates/

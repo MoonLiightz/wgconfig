@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+
+from dotenv import load_dotenv
+load_dotenv(verbose=True)
+
+import argparse
+import os
+import shutil
+import sys
+
+
+def run_install_server(args):
+    print('Initializes a new server')
+
+    conf_path = '/etc/wireguard/' + os.getenv('INTERFACE') + '.conf'
+    pwd = os.getenv('PWD')
+
+    print('Check if interface already exists')
+    if os.path.exists(conf_path):
+        if not args.force:
+            print('Interface %s already exists. An overwrite can be forced with -f' % os.getenv('INTERFACE'))
+            sys.exit(0)
+        else:
+            print('Shutdown interface')
+            os.system('wg-quick down {}'.format(os.getenv('INTERFACE')))
+
+    if not args.without_new_keys or not os.path.exists('{}/server_private_key'.format(pwd) or not os.path.exists('{}/server_public_key'.format(pwd))):
+        print('Create new private and public key')
+        os.system('wg genkey | tee {}/server_private_key | wg pubkey > {}/server_public_key'.format(pwd, pwd))
+    
+    print('Read server private key')
+    with open('{}/server_private_key'.format(os.getenv('PWD')), 'r') as file:
+        os.environ['SERVER_PRIVATE_KEY'] = file.readline().strip('\n')
+    
+    print('Create config file')
+    ip = os.getenv('VPN_NET').split('/')
+    cidr = ip[1:]
+    cidr.insert(0, '/')
+    cidr = ''.join(cidr)
+    os.environ['SERVER_IP'] = ''.join(ip[:-1])[:-1] + '1' + cidr
+    
+    server_conf_template_path = os.path.expandvars(os.getenv('TEMPLATE_DIR')) + '/server.conf.tpl'
+    with open(server_conf_template_path, 'r') as file:
+        server_conf_tpl = os.path.expandvars(file.read())
+        with open(conf_path, 'w') as output_file:
+            print(server_conf_tpl, file=output_file)
+
+    if args.start:
+        os.system('wg-quick up {}'.format(os.getenv('INTERFACE')))
+
+
+
+def run_create(args):
+    print('Create new user %s' % args.username)
+
+    user_dir = os.path.expandvars(os.getenv('USER_DIR')) + '/' + args.username
+
+    print('Check if user already exists')
+    if os.path.exists(user_dir):
+        if args.force:
+            print('User already exists. Delete existing user and create a new one')
+            run_delete(args)
+        else:
+            print('User %s already exists. An overwrite can be forced with -f' % args.username)
+            sys.exit(0)
+
+    os.environ['CLIENT_IP'] = args.client_ip
+    os.environ['DNS'] = args.dns
+    os.environ['ALLOWED_IPS'] = args.allowed_ips
+    os.environ['SERVER_LISTEN'] = args.server
+    
+    # Create user directory
+    print('Create user directory')
+    try:
+        os.makedirs(user_dir)
+    except FileExistsError:
+        print('Directory %s already exists' % user_dir)
+
+    print('Create new private and public key')
+    os.system('wg genkey | tee {}/privatekey | wg pubkey > {}/publickey'.format(user_dir, user_dir))
+
+    print('Read client private key')
+    with open('{}/privatekey'.format(user_dir), 'r') as file:
+        os.environ['PRIVATE_KEY'] = file.readline().strip('\n')
+
+    print('Read client public key')
+    with open('{}/publickey'.format(user_dir), 'r') as file:
+        os.environ['PUBLIC_KEY'] = file.readline().strip('\n')
+
+    print('Read server public key')
+    with open('{}/server_public_key'.format(os.getenv('PWD')), 'r') as file:
+        os.environ['SERVER_PUBLIC_KEY'] = file.readline().strip('\n')
+
+    print('Create config file')
+    client_conf_template_path = os.path.expandvars(os.getenv('TEMPLATE_DIR')) + '/client.conf.tpl'
+    with open(client_conf_template_path, 'r') as file:
+        client_conf_tpl = os.path.expandvars(file.read())
+        with open('{}/{}-{}.conf'.format(user_dir, args.username, os.uname()[1]), 'w') as output_file:
+            print(client_conf_tpl, file=output_file)
+    
+    print('Create QR code')
+    os.system('qrencode -o {}/{}-{}.png  < {}/{}-{}.conf'.format(user_dir, args.username, os.uname()[1], user_dir, args.username, os.uname()[1]))
+
+    print('Update server config')
+    ip = os.getenv('CLIENT_IP').split('/')[0] + '/32'
+    os.system('wg set {} peer {} allowed-ips {}'.format(os.getenv('INTERFACE'), os.getenv('PUBLIC_KEY'), ip))
+
+
+def run_delete(args):
+    user_dir = os.path.expandvars(os.getenv('USER_DIR')) + '/' + args.username
+    
+    print('Check if user %s exists' % args.username)
+    if not os.path.exists(user_dir):
+        print('User %s doesn\'t exist' % args.username)
+        sys.exit(1)
+
+    print('Delete user %s' % args.username)
+    print('Read client public key')
+    with open('{}/publickey'.format(user_dir), 'r') as file:
+        public_key = file.readline().strip('\n')
+    
+    print('Update server config')
+    os.system('wg set {} peer {} remove'.format(os.getenv('INTERFACE'), public_key))
+
+    print('Remove user directory')
+    shutil.rmtree(user_dir)
+
+def main():
+    parser = argparse.ArgumentParser(description='Create wireguard configuration files.')
+    subparser = parser.add_subparsers()
+    
+    install_server_subparser = subparser.add_parser('install-server', help='Initializes a new server')
+    install_server_subparser.add_argument('-f', '--force', action='store_true', default=False, help='Forces the creation of a new configuration even if one already exists')
+    install_server_subparser.add_argument('-s', '--start', action='store_true', default=False, help='Start interface after creation')
+    install_server_subparser.add_argument('--without-new-keys', action='store_true', default=False, help='Doesn\'t overwrite server keys')
+    install_server_subparser.set_defaults(func=run_install_server)
+
+    create_subparser = subparser.add_parser('create', help='Creates a new user')
+    create_subparser.add_argument('username', metavar='username', type=str, help='The username of the client')
+    create_subparser.add_argument('--client-ip', metavar='IP/CIDR', type=str, help="Local client vpn IP with CIDR", required=True)
+    create_subparser.add_argument('--dns', metavar='IP[,IP]', type=str, help="IP of the DNS server", required=False, default=os.getenv('VPN_DNS'))
+    create_subparser.add_argument('--allowed-ips', metavar='IP/CIDR[, IP/CIDR]', type=str, help='Allowed IPs with CIDR that routed through the tunnel', required=False, default=os.getenv('ALLOWED_IPS'))
+    create_subparser.add_argument('--server', metavar='IP:Port', type=str, help='Server IP and Port', required=False, default=os.path.expandvars(os.getenv('SERVER_LISTEN')))
+    create_subparser.add_argument('-f', '--force', action='store_true', required=False, default=False, help='Forces the creation of a new configuration even if one already exists')
+    create_subparser.set_defaults(func=run_create)
+
+    delete_subparser = subparser.add_parser('delete', help='Deletes an existing user')
+    delete_subparser.add_argument('username', metavar='username', type=str, help='The username of the client')
+    delete_subparser.set_defaults(func=run_delete)
+    
+    parser.add_argument('-v', '--version', action='version', version='v1.0')
+
+    args = parser.parse_args()
+    # print(args)
+    if hasattr(args, 'func'):
+        args.func(args)
+    else:
+        parser.print_help()
+
+if __name__ == '__main__':
+    main()
